@@ -46,7 +46,22 @@ app.get("/checkout-session", async (req, res) => {
 
 app.post("/create-checkout-session", async (req, res) => {
   const domainURL = process.env.DOMAIN;
-  const { priceId } = req.body;
+  
+  let { clientPrice } = req.body;
+  clientPrice = parseFloat(clientPrice);
+
+// Create a new product
+const product = await stripe.products.create({
+    name: 'Client Product',
+    });
+
+// Create a new price with the client's price divided by 4
+const price = await stripe.prices.create({
+    unit_amount: Math.round(clientPrice / 4 * 100), // Stripe uses cents, not dollars
+    currency: 'eur',
+    recurring: { interval: 'month' },
+    product: product.id,
+});
 
   // Create new Checkout Session for the order
   // Other optional params include:
@@ -60,7 +75,7 @@ app.post("/create-checkout-session", async (req, res) => {
       mode: "subscription",
       line_items: [
         {
-          price: priceId,
+          price: price.id,
           quantity: 1,
         },
       ],
@@ -109,39 +124,71 @@ app.post('/customer-portal', async (req, res) => {
 
 // Webhook handler for asynchronous events.
 app.post("/webhook", async (req, res) => {
-  let data;
-  let eventType;
-  // Check if webhook signing is configured.
-  if (process.env.STRIPE_WEBHOOK_SECRET) {
-    // Retrieve the event by verifying the signature using the raw body and secret.
-    let event;
-    let signature = req.headers["stripe-signature"];
-
-    try {
-      event = stripe.webhooks.constructEvent(
-        req.rawBody,
-        signature,
-        process.env.STRIPE_WEBHOOK_SECRET
-      );
-    } catch (err) {
-      console.log(`⚠️  Webhook signature verification failed.`);
-      return res.sendStatus(400);
+    let data;
+    let eventType;
+    // Check if webhook signing is configured.
+    if (process.env.STRIPE_WEBHOOK_SECRET) {
+      // Retrieve the event by verifying the signature using the raw body and secret.
+      let event;
+      let signature = req.headers["stripe-signature"];
+  
+      try {
+        event = stripe.webhooks.constructEvent(
+          req.rawBody,
+          signature,
+          process.env.STRIPE_WEBHOOK_SECRET
+        );
+      } catch (err) {
+        console.log(`⚠️  Webhook signature verification failed.`);
+        return res.sendStatus(400);
+      }
+      // Extract the object from the event.
+      data = event.data;
+      eventType = event.type;
+    } else {
+      // Webhook signing is recommended, but if the secret is not configured in `config.js`,
+      // retrieve the event data directly from the request body.
+      data = req.body.data;
+      eventType = req.body.type;
     }
-    // Extract the object from the event.
-    data = event.data;
-    eventType = event.type;
-  } else {
-    // Webhook signing is recommended, but if the secret is not configured in `config.js`,
-    // retrieve the event data directly from the request body.
-    data = req.body.data;
-    eventType = req.body.type;
-  }
-
-  if (eventType === "checkout.session.completed") {
-    console.log(`🔔  Payment received!`);
-  }
-
-  res.sendStatus(200);
-});
-
-app.listen(4242, () => console.log(`Node server listening at http://localhost:${4242}/`));
+  
+    if (eventType === "checkout.session.completed") {
+      const checkoutSession = data.object;
+      let schedule = await stripe.subscriptionSchedules.create({
+        from_subscription: checkoutSession.subscription,
+      });
+      console.log(`Schedule created: ${schedule.id}`)
+  
+      const phases = schedule.phases.map(phase => ({
+        start_date: phase.start_date,
+        end_date: phase.end_date,
+        items: phase.items,
+  
+      }))
+      console.log({ phases })
+      schedule = await stripe.subscriptionSchedules.update(
+        schedule.id,
+        { 
+          end_behavior: "cancel",
+          phases: [
+            ...phases,
+            {
+              items: [
+                {
+                  price: 'price_1OpAxdGPsOgY6erUDKfdglpa', // This updates the subscription to include a new price that iterates for 3 months
+                  quantity: 1,
+                },
+              ],
+              iterations: 3,
+            },
+          ],
+        }
+      )
+      console.log({ schedule })
+    }
+  
+    res.sendStatus(200);
+  });
+  
+  app.listen(4242, () => console.log(`Node server listening at http://localhost:${4242}/`));
+  
